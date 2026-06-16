@@ -1,0 +1,9 @@
+python-dotenv==1.0.1
+pandas==2.2.2
+numpy==2.1.1
+pydantic==2.9.2
+httpx>=0.27.0,<0.28
+MetaTrader5==5.0.4874
+pytest==8.3.2
+respx==0.21.1
+pytz==2024.1
