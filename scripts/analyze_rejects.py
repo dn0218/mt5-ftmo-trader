@@ -16,11 +16,16 @@ Heuristic per sample:
 
 Output: per-sample verdict (WOULD_WIN / WOULD_LOSE / FLAT) + class summary so
 we can tell whether HTF / LLM filters are saving losers or strangling winners.
+
+Default: replay the author's historical SAMPLES (bare names mapped via
+resolve_symbol). --live: replay this bot's own last-48h rejections from
+storage/logs/audit.jsonl.
 """
 from __future__ import annotations
 import os
 import sys
 import json
+import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -29,7 +34,8 @@ sys.path.insert(0, str(ROOT))
 
 env_path = ROOT / ".env"
 if env_path.exists():
-    for line in env_path.read_text().splitlines():
+    # encoding mandatory: Windows default is GBK on zh-CN systems
+    for line in env_path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -51,6 +57,19 @@ if not mt5.login(login, password=pwd, server=server):
     sys.exit(1)
 
 LOOK_FORWARD_BARS = 24  # 24 M15 bars = 6 hours
+
+
+def resolve_symbol(name: str) -> str:
+    """Map a bare symbol (author's broker) to this broker's suffixed name."""
+    if mt5.symbol_info(name) is not None:
+        return name
+    wanted = name.upper()
+    for s in (mt5.symbols_get(wanted + ".*") or []):
+        return s.name  # first suffix variant (e.g. 'USDJPY.')
+    for s in (mt5.symbols_get() or []):
+        if s.name.upper().rstrip(".") == wanted:
+            return s.name
+    return name  # give up; replay() will report NO_DATA
 
 
 def m15_floor(ts: datetime) -> datetime:
@@ -150,6 +169,77 @@ def replay(symbol: str, side: str, ts: datetime) -> dict:
     }
 
 
+LIVE_RE = re.compile(r"(?:LLM_REFUSE|LOW_CONFIDENCE|HTF_OPPOSED)", re.I)
+
+
+def load_live_samples() -> list:
+    """Pull the last 48h of replayable rejections from audit.jsonl.
+
+    Dedupes by (symbol, side, M15 bar): the engine re-logs the same cached
+    rejection every scan (~60s) while the sweep bar is unchanged, so raw
+    events overstate signal count ~11x. One replay per cluster.
+    """
+    from scripts.audit_reader import iter_events
+    out, seen = [], set()
+    hours = 48
+    for i, a in enumerate(sys.argv):
+        if a == "--hours" and i + 1 < len(sys.argv):
+            hours = int(sys.argv[i + 1])
+        if a == "--since" and i + 1 < len(sys.argv):
+            pass  # handled by iter_events callers; kept for CLI symmetry
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    for rec in iter_events():
+        ev = rec.get("event", "")
+        if ev not in ("TRADE_REJECTED", "SLTP_INVALID"):
+            continue
+        try:
+            ts = datetime.fromisoformat(rec["ts"])
+        except (KeyError, ValueError):
+            continue
+        if ts < cutoff:
+            continue
+        d = rec.get("data", {})
+        sym, side = d.get("symbol"), d.get("side")
+        if not sym or not side:
+            continue  # pre-patch SLTP_INVALID rows lack 'side'
+        bar = ts.replace(minute=(ts.minute // 15) * 15, second=0, microsecond=0)
+        key = (sym, side, bar)
+        if key in seen:
+            continue
+        seen.add(key)
+        reason = (d.get("reason") or "")[:60]
+        klass = ("SLTP_INVALID_" if ev == "SLTP_INVALID" else "REJECT_") + sym.rstrip(".")
+        out.append((klass, ts, sym, side, reason))
+    return out
+
+
+def summarize(samples: list, verdicts: dict) -> None:
+    """Print W/L/F per (symbol, side) and per reason-class — with honest
+    sample-size caveats. 48h snapshots are ONE market state; do not treat
+    W>>L as proof the filter is good until n is in the hundreds across
+    different regimes."""
+    from collections import Counter
+    per_ss, per_class = Counter(), Counter()
+    for s in samples:
+        k, _ts, sym, side, _reason = s if len(s) == 5 else (*s, "")
+        v = verdicts.get((sym, side, _ts), "?")
+        per_ss[(k, v)] += 1
+        per_class[v] += 1
+    print("\nVERDICT BREAKDOWN (unique signals):")
+    print(f"  overall: W:{per_class['WOULD_WIN']} L:{per_class['WOULD_LOSE']} "
+          f"F:{per_class['FLAT']} other:{per_class['?']}")
+    by_klass = {}
+    for (k, v), n in per_ss.items():
+        by_klass.setdefault(k, Counter())[v] = n
+    for k, c in sorted(by_klass.items()):
+        print(f"  {k:<30} W:{c['WOULD_WIN']} L:{c['WOULD_LOSE']} "
+              f"F:{c['FLAT']} other:{c['?']}")
+    n = sum(per_class.values())
+    if n < 200:
+        print(f"\n  ⚠ n={n} < 200 and spans ≤48h ≈ one market state — "
+              "NOT statistically robust. Track weekly.")
+
+
 SAMPLES = [
     # class, ts, symbol, side
     ("HTF_BLOCK_BULLISH_blocks_SELL", "2026-04-29T13:30:00+00:00", "USDJPY", "SELL"),
@@ -167,15 +257,37 @@ SAMPLES = [
     ("SLTP_INVALID_EURUSD",           "2026-04-27T14:52:00+00:00", "EURUSD", "BUY"),
 ]
 
+samples = [(k, t, s, sd) for (k, t, s, sd, _r) in load_live_samples()] if "--live" in sys.argv else SAMPLES
+if not samples:
+    print("No replayable rejection events in the last 48h.")
+    mt5.shutdown()
+    sys.exit(0)
+
+mode = "LIVE (last 48h from audit.jsonl)" if "--live" in sys.argv else "AUTHOR HISTORICAL SAMPLES"
+if "--hours" in sys.argv:
+    mode += f" window={sys.argv[sys.argv.index('--hours')+1]}h"
+print(f"Replaying {len(samples)} samples - {mode}")
 print(f"{'CLASS':<35} {'TS':<26} {'SYM':<8} {'SIDE':<5} {'VERDICT':<12} {'H4':<5}  ENTRY -> SL/TP")
 print("-" * 130)
 
 class_stats = {}
-for klass, ts_iso, sym, side in SAMPLES:
-    ts = datetime.fromisoformat(ts_iso)
-    r = replay(sym, side, ts)
+samples = [(k, t, s, sd) for (k, t, s, sd, _r) in load_live_samples()] if "--live" in sys.argv else SAMPLES
+if not samples:
+    print("No replayable rejection events in the last 48h.")
+    mt5.shutdown()
+    sys.exit(0)
+
+_sample_keys = []
+class_stats_flat = []
+for klass, ts, sym, side in samples:
+    if isinstance(ts, str):
+        ts = datetime.fromisoformat(ts)
+    r = replay(resolve_symbol(sym), side, ts)
     v = r.get("verdict", "?")
+    _sample_keys.append((sym, side, ts))
+    class_stats_flat.append(v)
     class_stats.setdefault(klass, []).append(v)
+    ts_iso = ts.isoformat()
     if v in ("WOULD_WIN", "WOULD_LOSE", "FLAT"):
         print(f"{klass:<35} {ts_iso:<26} {sym:<8} {side:<5} {v:<12} {r['h4_dir']:<5}  "
               f"{r['entry']:.5f} -> SL {r['sl']:.5f} / TP {r['tp']:.5f}")
@@ -190,6 +302,10 @@ for klass, verdicts in class_stats.items():
     losses = verdicts.count("WOULD_LOSE")
     flats = verdicts.count("FLAT")
     print(f"  {klass:<35}  W:{wins} L:{losses} F:{flats}")
+
+if "--live" in sys.argv:
+    vmap = dict(zip(_sample_keys, class_stats_flat))
+    summarize(samples, vmap)
 print()
 print("Interpretation:")
 print("  W (WOULD_WIN)  = filter blocked a winner (cost)")

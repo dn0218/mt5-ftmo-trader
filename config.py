@@ -70,8 +70,9 @@ class Config:
         try:
             import httpx
             if self.llm_provider == "openai":
+                base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
                 r = httpx.get(
-                    "https://api.openai.com/v1/models",
+                    f"{base_url}/models",
                     headers={"Authorization": f"Bearer {self.openai_api_key}"},
                     timeout=10.0,
                 )

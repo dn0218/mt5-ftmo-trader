@@ -37,8 +37,12 @@ def _ensure_start_balance(state: dict) -> None:
 
 
 def record_trade(ticket: int, symbol: str, side: str, volume: float,
-                 entry: float, exit_price: float, pnl: float, reason: str) -> None:
-    """Record a completed trade."""
+                 entry: float, exit_price: float, pnl: float, reason: str,
+                 r_multiple: float | None = None) -> None:
+    """Record a completed trade.
+
+    r_multiple: net P&L in units of the position's initial 1R (risk).
+    None when the risk basis is unknown (legacy state)."""
     state = get_performance()
     _ensure_start_balance(state)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -51,6 +55,7 @@ def record_trade(ticket: int, symbol: str, side: str, volume: float,
         "exit": exit_price,
         "pnl": pnl,
         "reason": reason,
+        "r_multiple": r_multiple,
         "date": today,
         "ts": datetime.now(timezone.utc).isoformat(),
     })

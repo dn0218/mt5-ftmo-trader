@@ -30,7 +30,10 @@ def main():
         print("❌ Cannot connect to MT5")
         return 1
 
-    symbol = "EURUSD"
+    # Use the first configured symbol (broker suffixes like "EURUSD." supported),
+    # overridable via CLI: python scripts/smoke_test.py XAUUSD.
+    symbol = (sys.argv[1] if len(sys.argv) > 1
+              else os.getenv("SYMBOLS", "EURUSD").split(",")[0].strip())
     df = MT5Client.get_bars(symbol, mt5.TIMEFRAME_M15, 200)
     if df is None:
         print(f"❌ No data for {symbol}")

@@ -33,16 +33,25 @@ def _call_openai_api(messages: list[dict]) -> str | None:
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     timeout = float(os.getenv("LLM_TIMEOUT", "30"))
 
+    # OPENAI_BASE_URL: point to any OpenAI-compatible endpoint.
+    # Defaults to the official API so behaviour is unchanged when unset.
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+
+    # LLM_MAX_TOKENS: reasoning models (GLM/qwen-thinking etc.) burn tokens on
+    # chain-of-thought before the visible content — 200 starves them and yields
+    # an empty message. Default 2000 leaves room for reasoning + JSON body.
+    max_tokens = int(os.getenv("LLM_MAX_TOKENS", "2000"))
+
     payload = {
         "model": model,
         "messages": messages,
-        "max_tokens": 200,
+        "max_tokens": max_tokens,
         "temperature": float(os.getenv("LLM_TEMPERATURE", os.getenv("OLLAMA_TEMPERATURE", "0.1"))),
         "response_format": {"type": "json_object"},
     }
 
     resp = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
+        f"{base_url}/chat/completions",
         json=payload,
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -482,6 +491,56 @@ def clear_decision_cache() -> None:
     _DECISION_CACHE_ORDER.clear()
 
 
+# --- LLM daily budget guard: cap real (non-cached) API calls per UTC day ---
+# Fail-closed: over cap -> prescreen-style REFUSE, never an API call.
+# Set LLM_DAILY_CALL_CAP=0 to disable. Guard lives AFTER cache lookup, so
+# cached hits are free.
+# Counter is PERSISTED to risk_state.json (storage/db/risk_state.json) on
+# every increment, so a restart / crash does NOT reset the day's budget.
+# Multi-instance note: read-modify-write is best-effort cross-process
+# (state_store lock is per-process); the cap still bounds each copy.
+_BUDGET_DEFAULT = 1000
+_budget_state = {"date": None, "count": 0}
+_BUDGET_STATE_PATH = os.path.join("storage", "db", "risk_state.json")
+
+
+def _budget_check_and_count() -> bool:
+    cap = int(os.getenv("LLM_DAILY_CALL_CAP", str(_BUDGET_DEFAULT)))
+    if cap <= 0:
+        return True
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+
+    from services.risk.state_store import read_state, write_state
+    persisted = read_state(_BUDGET_STATE_PATH, {}).get("llm_budget", {})
+    # Adopt persisted counter unless the in-memory one is ahead (same-day
+    # process already counted higher) or the persisted date is stale.
+    if persisted.get("date") == today:
+        if int(persisted.get("count", 0)) > _budget_state.get("count", 0) \
+                or _budget_state.get("date") != today:
+            _budget_state["date"] = today
+            _budget_state["count"] = int(persisted.get("count", 0))
+    if _budget_state["date"] != today:
+        _budget_state["date"] = today
+        _budget_state["count"] = 0
+
+    if _budget_state["count"] >= cap:
+        return False
+    _budget_state["count"] += 1
+    _persist_budget(_BUDGET_STATE_PATH, today, _budget_state["count"])
+    return True
+
+
+def _persist_budget(path: str, date: str, count: int) -> None:
+    try:
+        from services.risk.state_store import read_state, write_state
+        state = read_state(path, {})
+        state["llm_budget"] = {"date": date, "count": count}
+        write_state(path, state)
+    except Exception:
+        # Budget bookkeeping must never break trading; in-memory still holds.
+        pass
+
+
 def call_llm(evidence: dict, side: str | None = None,
              cache_key: tuple[str, str, int] | None = None) -> dict | None:
     """Call LLM (OpenAI or Ollama) for trade decision. Returns None on failure.
@@ -510,6 +569,11 @@ def call_llm(evidence: dict, side: str | None = None,
     llm_enabled = os.getenv("LLM_ENABLED", os.getenv("OLLAMA_ENABLED", "true"))
     if llm_enabled != "true":
         return None
+
+    if not _budget_check_and_count():
+        logger.warning("LLM daily cap reached - refusing without API call")
+        return {"decision": "REFUSE", "confidence": 0.99,
+                "justification": "LLM_DAILY_CALL_CAP reached"}
 
     user_msg = _build_user_message(evidence, side=side)
     messages = [

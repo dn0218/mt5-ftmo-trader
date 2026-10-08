@@ -45,15 +45,16 @@ def check_invalidation(evidence: dict, position_info: dict) -> dict | None:
             if not api_key:
                 return None
             model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
             payload = {
                 "model": model,
                 "messages": messages,
-                "max_tokens": 150,
+                "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "2000")),
                 "temperature": float(os.getenv("LLM_TEMPERATURE", os.getenv("OLLAMA_TEMPERATURE", "0.1"))),
                 "response_format": {"type": "json_object"},
             }
             resp = httpx.post(
-                "https://api.openai.com/v1/chat/completions",
+                f"{base_url}/chat/completions",
                 json=payload,
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 timeout=timeout,

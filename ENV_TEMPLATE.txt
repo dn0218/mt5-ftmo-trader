@@ -1,0 +1,118 @@
+# ============================================================
+# mt5-ftmo-trader 配置模板
+# 使用方法： copy ENV_TEMPLATE.txt .env  然后填入真实凭据
+# 变量名与仓库 .env.example 严格一致（此模板已补充 OPENAI_BASE_URL）
+# ============================================================
+
+# ── MT5 连接（必填三件套）────────────────────────────
+MT5_LOGIN=你的MT5登录号
+MT5_PASSWORD=你的MT5密码
+MT5_SERVER=你的经纪商服务器名称（如 ICMarkets-Demo）
+
+# ── LLM 提供商选择：openai 或 ollama ──────────────────
+LLM_PROVIDER=openai
+LLM_ENABLED=true
+LLM_TIMEOUT=30
+# 推理模型（GLM/qwen-thinking 等）思维链消耗 token，200 会导致正文为空
+LLM_MAX_TOKENS=2000
+
+# ── 方案一：OpenAI 兼容 API（接自有模型）───────────────
+# ⚠️ OPENAI_BASE_URL 依赖已应用的补丁（services/decision/ollama_decider.py）
+OPENAI_API_KEY=你的API_Key
+# 填你的服务根地址，通常以 /v1 结尾，末尾不要带 /chat/completions
+OPENAI_BASE_URL=https://your-api-endpoint.example.com/v1
+OPENAI_MODEL=你的模型名称（如 qwen2.5-72b-instruct）
+
+# ── 方案二：本地 Ollama 备选（LLM_PROVIDER=ollama 时启用）──
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3:4b
+OLLAMA_TIMEOUT=60
+OLLAMA_NUM_CTX=4096
+OLLAMA_TEMPERATURE=0.1
+OLLAMA_ENABLED=true
+
+# ── 交易参数 ─────────────────────────────────────────
+# ⚠️ 必须用经纪商真实符号名！GlobalFuturesServices 的符号带点号后缀
+SYMBOLS=EURUSD.,XAUUSD.
+TIMEFRAME=M15
+LOOKBACK_BARS=500
+SCAN_INTERVAL_SECONDS=60
+SESSION_KILL_ZONES=07:00-09:00,13:00-15:00
+
+# ── FTMO 风控（默认值即项目校准值，勿随意改）────────────
+RISK_PER_TRADE=0.5
+MAX_DAILY_DRAWDOWN=2.0
+MAX_TOTAL_DRAWDOWN=6.0
+MAX_SPREAD_POINTS=25
+RISK_REWARD_MIN=2.0
+MAX_CONCURRENT_POSITIONS=2
+MAX_TRADES_PER_DAY=10
+SL_COOLDOWN_SECONDS=3600
+CONSECUTIVE_LOSS_HALT=3
+MIN_CONFLUENCE_SCORE=3
+MIN_CONFLUENCE_SCORE_HTF_ALIGNED=3
+MIN_CONFLUENCE_SCORE_HTF_OPPOSED=4
+MIN_LLM_CONFIDENCE=0.70
+MIN_LLM_CONFIDENCE_HTF_OPPOSED=0.80
+HTF_FILTER_MODE=soft
+RSI_GATE_FOR_SCORE_3=true
+
+# ── 每品种止损距离（点）──────────────────────────────
+MIN_SL_PIPS=15
+MIN_SL_PIPS_EURUSD=15
+MIN_SL_PIPS_XAUUSD=60
+MAX_SL_PIPS=150
+MAX_SL_PIPS_XAUUSD=300
+
+# ── 交易管理（TP 阶梯）───────────────────────────────
+BE_TRIGGER_R=1.0
+CLOSE_ON_INVALIDATION=true
+TP1_CLOSE_PCT=50
+TP2_CLOSE_PCT=30
+EOS_BE_GUARD_MINUTES=30
+HARD_RR_CAP=5.0
+RR_FLOOR_SCORE_4=2.5
+RR_FLOOR_SCORE_5=3.0
+TRAIL_ENABLED=true
+TRAIL_ATR_MULT=1.5
+LLM_PLAN_TARGETS=false
+
+# ── 交易时段（UTC）───────────────────────────────────
+TRADING_START_UTC=07:00
+TRADING_END_UTC=20:00
+
+# ── 过滤器 ───────────────────────────────────────────
+NEWS_FILTER_ENABLED=true
+NEWS_BLACKOUT_PRE_MINUTES=30
+NEWS_BLACKOUT_POST_MINUTES=15
+REGIME_FILTER_ENABLED=true
+REGIME_ALLOW_RANGING=false
+REGIME_ALLOW_VOLATILE=false
+HTF_FILTER_ENABLED=true
+HTF_TIMEFRAME=H4
+HTF_LOOKBACK_BARS=200
+
+# ── 预检 ─────────────────────────────────────────────
+PRECHECK_REQUIRE_BOS=true
+PRECHECK_REQUIRE_CHOCH=true
+PRECHECK_REQUIRE_SWEEP=true
+PRECHECK_REQUIRE_STRONG_SWEEP=true
+PRECHECK_MIN_CORE_SIGNALS=1
+SWEEP_DIRECTION_FILTER_ENABLED=true
+
+# ── Evidence 载荷 ────────────────────────────────────
+EVIDENCE_CANDLES_LIMIT=48
+EVIDENCE_EVENTS_LIMIT=15
+LLM_EVIDENCE_TOKEN_BUDGET=3000
+
+# ── 执行 ─────────────────────────────────────────────
+EXECUTION_ENABLED=true
+# ⚠️ 首次运行务必保持 true（模拟模式，不实际下单）
+DRY_RUN=true
+LLM_DECISION_DEBUG=true
+
+# ── Telegram 通知 ────────────────────────────────────
+# config.py 校验要求变量必须存在；留 PLACEHOLDER 时推送降级为本地日志，不阻塞运行
+TELEGRAM_BOT_TOKEN=你的Bot_Token或PLACEHOLDER
+TELEGRAM_CHAT_ID=你的Chat_ID或PLACEHOLDER
+TELEGRAM_ENABLED=true

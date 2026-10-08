@@ -31,6 +31,7 @@ def place_order(symbol: str, side: str, volume: float,
     }
 
     result = None
+    trail = []  # per-attempt retcodes for the audit trail
     for filling in [
         mt5.ORDER_FILLING_FOK,
         mt5.ORDER_FILLING_IOC,
@@ -38,6 +39,9 @@ def place_order(symbol: str, side: str, volume: float,
     ]:
         request["type_filling"] = filling
         result = mt5.order_send(request)
+        retcode = result.retcode if result else None
+        trail.append(f"{'FOK' if filling == 0 else 'IOC' if filling == 1 else 'RET'}:"
+                     f"{retcode}")
         if result is None:
             continue
         if result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -50,7 +54,7 @@ def place_order(symbol: str, side: str, volume: float,
                 "sl": sl,
                 "tp": tp,
                 "filling": filling,
-            })
+            }, stream="lifecycle")
             return {
                 "ticket": result.order,
                 "price": result.price,
@@ -62,14 +66,26 @@ def place_order(symbol: str, side: str, volume: float,
             if tick:
                 request["price"] = tick.ask if side == "BUY" else tick.bid
             logger.info("Requote on %s, retrying with fresh price", symbol)
+            continue
+        if result.retcode == 10030:
+            # unsupported filling mode -> the ONLY error that justifies
+            # trying the next mode in the fallback chain
+            continue
+        # Any other error (invalid stops, no money, market closed, off-quote,
+        # ...) will not heal by switching fill mode — abort with the real
+        # reason instead of letting a later 10030 mask it.
+        break
 
-    # All fill modes failed
+    # All attempts exhausted
     retcode = result.retcode if result else "NO_RESULT"
     comment = result.comment if result else "No result"
-    logger.error("Order failed for %s: retcode=%s comment=%s", symbol, retcode, comment)
+    logger.error("Order failed for %s: retcode=%s comment=%s trail=%s",
+                 symbol, retcode, comment, "->".join(trail))
     log_event("ORDER_FAILED", {
         "symbol": symbol, "side": side, "volume": volume,
         "retcode": str(retcode), "comment": comment,
-    })
-    notify(f"❌ ORDER FAILED: {symbol} {side} {volume} lots\nCode: {retcode}\n{comment}")
+        "trail": "->".join(trail),
+    }, stream="lifecycle")
+    notify(f"❌ ORDER FAILED: {symbol} {side} {volume} lots\n"
+           f"Code: {retcode}\n{comment}\ntrail: {' -> '.join(trail)}")
     return None

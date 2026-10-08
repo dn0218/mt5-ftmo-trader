@@ -1,0 +1,1 @@
+Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'C:\Users\User\Desktop\mt5-ftmo-trader\run_bot.ps1' -WorkingDirectory 'C:\Users\User\Desktop\mt5-ftmo-trader' -WindowStyle Hidden

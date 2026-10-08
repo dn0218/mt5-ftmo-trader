@@ -606,7 +606,7 @@ def run_stress_test():
 
     # Save full results
     report_path = os.path.join("storage", "logs", "llm_stress_test.json")
-    with open(report_path, "w") as f:
+    with open(report_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
     print(f"\n  Full results saved to: {report_path}")
 

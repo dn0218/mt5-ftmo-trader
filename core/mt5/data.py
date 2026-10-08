@@ -14,6 +14,15 @@ class MT5Client:
     @staticmethod
     def get_bars(symbol: str, timeframe: int, count: int = 500) -> pd.DataFrame | None:
         """Fetch OHLCV bars, sorted oldest-first."""
+        # Ensure the symbol is selected in MarketWatch — suffixed broker symbols
+        # (e.g. "EURUSD.") return no bars from copy_rates unless selected.
+        try:
+            info = mt5.symbol_info(symbol)
+            if info is not None and not info.visible:
+                mt5.symbol_select(symbol, True)
+        except Exception:
+            pass
+
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
         if rates is None or len(rates) == 0:
             logger.warning("No bars returned for %s tf=%s", symbol, timeframe)

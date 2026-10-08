@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import logging
+import logging.handlers
 import traceback
 from pathlib import Path
 
@@ -29,10 +30,37 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("storage/logs/bot.log", encoding="utf-8"),
+        logging.handlers.TimedRotatingFileHandler(
+            "storage/logs/bot.log", when="midnight", backupCount=14,
+            encoding="utf-8"),
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+class _SecretScrubber(logging.Filter):
+    """Mask secrets (Telegram bot token etc.) in every log line.
+
+    httpx logs full request URLs — including the bot token — at INFO level,
+    which previously leaked the credential into bot.log on every call.
+    """
+
+    def __init__(self, secrets: list[str]) -> None:
+        super().__init__()
+        self._secrets = [s for s in secrets if s]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        for s in self._secrets:
+            if s in msg:
+                record.msg = msg.replace(s, "***")
+                record.args = None
+        return True
+
+
+_scrubber = _SecretScrubber([os.getenv("TELEGRAM_BOT_TOKEN", "")])
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_scrubber)
 
 
 def run_engine():
@@ -84,8 +112,26 @@ def main():
 
     while True:
         try:
-            run_engine()
+            import os
+            import uuid
+            from services.logging.audit_logger import log_event
+            # Process-lifecycle audit. session_id pairs BOT_START/BOT_STOP even
+            # across crashes (crash = STOP missing for that session_id, which is
+            # distinct from multi-instance = a NEW BOT_START while another
+            # session_id is still unpaired).
+            session_id = uuid.uuid4().hex[:12]
+            log_event("BOT_START", {"session_id": session_id,
+                                    "pid": os.getpid(), "ppid": os.getppid(),
+                                    "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini")},
+                      stream="lifecycle")
+            try:
+                run_engine()
+            finally:
+                log_event("BOT_STOP", {"session_id": session_id,
+                                       "pid": os.getpid()},
+                          stream="lifecycle")
             # Clean exit (KeyboardInterrupt caught inside run_engine)
+        
             break
         except KeyboardInterrupt:
             notify("⏹️ Engine stopped by user (Ctrl+C)")

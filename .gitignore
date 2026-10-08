@@ -32,3 +32,42 @@ SETUP_PROMPT.md
 Thumbs.db
 desktop.ini
 *.swp
+.cptr
+
+# ===== Security hardening (secret-leak audit) =====
+# Local logs / runtime data may contain bot tokens, account numbers, equity, trade history
+mylog.txt
+*.log
+*.log.*
+storage/logs/
+storage/snapshots/
+storage/db/
+storage/demo_validation_start.txt
+storage/audit_lifecycle/
+*.jsonl
+# Scratch / one-off analysis outputs and shell debris
+tmp_*.py
+0]
+0][-20
+127]
+18
+3}
+3}x
+0][-20
+[*]
+*[]]
+
+cut
+scan_secrets.ps1
+harden_and_stage.ps1
+scripts/b*.json
+# Deprecated local artifacts
+deprecated_shortcuts/
+run_bot.bat.DEPRECATED
+*.lnk
+*.lnk.deleted.*
+# Incident / ops notes with account numbers and P&L (keep local only)
+INCIDENT_*.md
+storage/INCIDENT_*.md
+0\]\[-20
+scripts/*.json

@@ -60,7 +60,8 @@ class TradeManager:
                        score: int, confidence: float,
                        tp1: float | None = None,
                        tp2: float | None = None,
-                       tp_final: float | None = None) -> None:
+                       tp_final: float | None = None,
+                       sig_entry: float | None = None) -> None:
         """Register a new trade for management.
 
         tp1/tp2 are absolute prices for the partial-close ladder.
@@ -74,6 +75,24 @@ class TradeManager:
             tp2 = entry + sign * sl_dist * 1.5
         if tp_final is None:
             tp_final = tp
+
+        # ── Re-anchor TP ladder to the FILL price ──────────────────────
+        # Signal-side ladder is computed from the confirming-bar close,
+        # but the fill slips (0.53 XAU observed 9/28). BE / current_r use
+        # the fill, so a signal-anchored TP1 sits at 1.09R -> BE fires at
+        # 1R, TP1 waits 30min. Translate the ladder's R-offsets onto the
+        # fill so TP1 == 1.00R of actual risk, preserving R-geometry.
+        sig_entry = sig_entry if sig_entry is not None else entry
+        sig_dist = abs(sig_entry - sl)
+        if sig_dist > 0 and abs(entry - sig_entry) > 1e-12:
+            sign = 1 if side == "BUY" else -1
+            fill_dist = abs(entry - sl)
+            r1 = (tp1 - sig_entry) / sig_dist if side == "BUY" else (sig_entry - tp1) / sig_dist
+            r2 = (tp2 - sig_entry) / sig_dist if side == "BUY" else (sig_entry - tp2) / sig_dist
+            rf = (tp_final - sig_entry) / sig_dist if side == "BUY" else (sig_entry - tp_final) / sig_dist
+            tp1 = entry + sign * r1 * fill_dist
+            tp2 = entry + sign * r2 * fill_dist
+            tp_final = entry + sign * rf * fill_dist
         with self._lock:
             state = read_state(self._state_path, {})
             state[str(ticket)] = {
@@ -89,6 +108,10 @@ class TradeManager:
                 "tp_final": tp_final,
                 "score": score,
                 "confidence": confidence,
+                "initial_sl_dist": sl_dist,   # frozen 1R basis — BE moves SL,
+                                            # never the R-metric (probe-matrix
+                                            # catch: post-BE sl_dist==0 silently
+                                            # skipped the whole TP ladder)
                 "be_triggered": False,
                 "tp1_closed": False,
                 "tp2_closed": False,
@@ -130,7 +153,7 @@ class TradeManager:
             log_event("TRADE_ADOPTED", {
                 "ticket": int(pos.ticket), "symbol": pos.symbol, "side": side,
                 "entry": entry, "sl": sl, "tp": tp,
-            })
+            }, stream="lifecycle")
             adopted += 1
         return adopted
 
@@ -164,7 +187,9 @@ class TradeManager:
             entry = trade["entry"]
             sl = trade["sl"]
             side = trade["side"]
-            sl_dist = abs(entry - sl)
+            # 1R basis is FROZEN at registration; SL moves (BE/trailing)
+            # must never zero it out.
+            sl_dist = trade.get("initial_sl_dist") or abs(entry - sl)
             if sl_dist <= 0:
                 continue
 
@@ -260,6 +285,17 @@ class TradeManager:
                     state.pop(t, None)
                 write_state(self._state_path, state)
 
+    @staticmethod
+    def _pip_value(symbol: str) -> float | None:
+        """$ value of 1.0 price unit for 1 lot (tick_value/tick_size ratio)."""
+        try:
+            info = mt5.symbol_info(symbol)
+            if info and info.trade_tick_size > 0:
+                return info.trade_tick_value / info.trade_tick_size
+        except Exception:
+            pass
+        return None
+
     def _handle_closed_position(self, trade: dict) -> None:
         """Handle a position that was closed — detect SL/TP hit with retry."""
         ticket = trade["ticket"]
@@ -296,7 +332,18 @@ class TradeManager:
 
             matching.sort(key=lambda d: d.time)
             deal = matching[-1]
-            pnl = float(getattr(deal, "profit", 0.0) or 0.0)
+            # A position managed by the TP ladder (TP1/TP2 partial closes)
+            # produces MULTIPLE close deals. P&L must aggregate every leg —
+            # including commission and swap — or a TP1-winner that BEs out
+            # on the runner reports as a loss (observed 9/28: TP1 +26.26
+            # + BE -0.04 recorded as -0.04).
+            pnl = sum(
+                float(getattr(d, "profit", 0.0) or 0.0)
+                + float(getattr(d, "commission", 0.0) or 0.0)
+                + float(getattr(d, "swap", 0.0) or 0.0)
+                for d in matching
+            )
+            legs = len(matching)
             exit_price = float(getattr(deal, "price", 0.0) or 0.0)
             reason = _DEAL_REASON.get(getattr(deal, "reason", -1), "UNKNOWN")
             break
@@ -305,6 +352,19 @@ class TradeManager:
             log_event("EXIT_LOOKUP_FAILED", {
                 "ticket": ticket, "symbol": trade.get("symbol", "?"),
             })
+
+        # Net R multiple: aggregate P&L over the frozen initial risk.
+        # 1R basis = initial_sl_dist * full volume (frozen at registration);
+        # with commission/swap folded into pnl this yields the true per-trade R.
+        sl_dist0 = trade.get("initial_sl_dist")
+        r_mult = None
+        if sl_dist0 and sl_dist0 > 0:
+            pip_val = self._pip_value(trade["symbol"])
+            if pip_val:
+                risk_per_unit = sl_dist0 * pip_val   # $ risk per 1.0 lot
+                one_r = risk_per_unit * trade["volume"]
+                if one_r > 0:
+                    r_mult = round(pnl / one_r, 3)
 
         # Record to analytics
         record_trade(
@@ -316,6 +376,7 @@ class TradeManager:
             exit_price=exit_price,
             pnl=pnl,
             reason=reason,
+            r_multiple=r_mult,
         )
 
         # Update risk state
@@ -332,9 +393,15 @@ class TradeManager:
             emoji = "🎯" if pnl >= 0 else "🛑"
             label = "MANUAL"
         else:
-            # Breakeven or zero P&L
-            emoji = "➡️"
-            label = "BE"
+            # Breakeven or zero P&L — but with a TP-ladder aggregate this can
+            # still be a net winner (TP1 banked, runner BE'd): book it as one.
+            if pnl > 0.01:
+                self._risk_manager.record_win()
+                emoji = "🎯"
+                label = "TP_PARTIAL_BE"
+            else:
+                emoji = "➡️"
+                label = "BE"
 
         notify(
             f"{emoji} <b>{label} HIT</b>: {trade['symbol']} {trade['side']}\n"
@@ -344,7 +411,7 @@ class TradeManager:
         log_event("POSITION_CLOSED", {
             "ticket": ticket, "symbol": trade["symbol"],
             "reason": reason, "pnl": pnl, "exit_price": exit_price,
-        })
+        }, stream="lifecycle")
 
     def _modify_sl(self, ticket: int, symbol: str, new_sl: float,
                    tp: float | None = None, *, label: str = "BREAKEVEN") -> bool:
@@ -372,7 +439,7 @@ class TradeManager:
                     notify(f"🌙 EOS BE: {symbol} SL → {new_sl:.5f} (session close)")
                 else:
                     notify(f"📈 Trailing: {symbol} SL → {new_sl:.5f}")
-                log_event(label, {"ticket": ticket, "symbol": symbol, "new_sl": new_sl})
+                log_event(label, {"ticket": ticket, "symbol": symbol, "new_sl": new_sl}, stream="lifecycle")
                 return True
         except Exception as e:
             logger.warning("Failed to modify SL for %s: %s", ticket, e)
@@ -470,7 +537,7 @@ class TradeManager:
                 log_event("PARTIAL_CLOSE", {
                     "ticket": ticket, "symbol": symbol,
                     "label": label, "volume_closed": close_vol,
-                })
+                }, stream="lifecycle")
                 return True
         except Exception as e:
             logger.warning("Partial close failed for %s: %s", ticket, e)

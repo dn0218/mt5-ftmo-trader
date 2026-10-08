@@ -49,6 +49,12 @@ sys.modules["MetaTrader5"] = _mt5
 # ── Silence Telegram during tests ──
 os.environ["TELEGRAM_ENABLED"] = "false"
 os.environ["DRY_RUN"] = "true"
+# Isolate the audit log: synthetic events must NEVER append to the
+# production storage/logs/audit.jsonl (ticket=99 phantom TRADE_ADOPTED
+# events from test runs polluted funnel stats across three analysis rounds).
+import tempfile
+_AUDIT_ISOLATION = tempfile.mkdtemp(prefix="audit_iso_")
+os.environ["AUDIT_LOG_OVERRIDE"] = os.path.join(_AUDIT_ISOLATION, "audit.jsonl")
 # Use Ollama provider in tests (mocked via respx)
 os.environ["LLM_PROVIDER"] = "ollama"
 os.environ["LLM_ENABLED"] = "true"

@@ -3,13 +3,16 @@
 from __future__ import annotations
 import MetaTrader5 as mt5
 
+from core.mt5.symbols import pip_size
+
 
 def get_pip_size(symbol: str) -> float:
-    """Get pip size for a symbol."""
+    """Get pip size for a symbol (single source: core.mt5.symbols.pip_size)."""
     info = mt5.symbol_info(symbol)
     if not info:
         return 0.0001  # default forex
-    return info.point * 10 if info.digits in (3, 5) else info.point
+    p = pip_size(symbol, info)
+    return p if p > 0 else 0.0001
 
 
 def price_to_pips(symbol: str, price_distance: float) -> float:
